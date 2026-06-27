@@ -2,6 +2,7 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/cudaimgproc.hpp>
+#include "inference.hpp"
 
 // Burada yapmış olduğum RAM --> VRAM --> RAM işlemleri CPU ve GPU belleğinin ortak olmadığı cihazlar için
 // Eğer Jetson gibi modülleriniz varsa (bu modüller CPU ve GPU için RAM'lerini ortak kullanır) bu işlemler, sıkılınca duvara pinpon topu fırlatıp durmaktan farksızdır
@@ -15,6 +16,30 @@ int main(){
         return -1;
     } 
 
+    cv::VideoCapture cap(1);
+    if(!cap.isOpened()) {
+        std::cerr<<"Hata: Video açılamadı. "<<std::endl;
+        return 0;
+    }
+    
+    cv::Mat frame;
+    Engine engine("asd", "123");
+
+    while (true)
+    {
+        cap >> frame;
+        if(frame.empty()) break;
+
+        cv::imshow("JetsonApp", frame);
+
+        if(cv::waitKey(1) == 27) break;
+    }
+    
+    cap.release();
+    cv::destroyAllWindows();
+
+
+    /*
     // Görüntüyü ilk aşamada CPU'ya okutup RAM'e yükledim
     cv::Mat cpu_image = cv::imread("test.jpg", cv::IMREAD_COLOR);
     if(cpu_image.empty()){
@@ -33,6 +58,7 @@ int main(){
     
     cv::imshow("JetsonApp", res);
     cv::waitKey(0);
-
+    */
     return 0;
+    
 }
