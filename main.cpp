@@ -23,7 +23,7 @@ int main(){
     }
     
     cv::Mat frame;
-    Engine engine("asd", "123");
+    Engine engine("yolo11s.engine", "yolo11s.onnx");
 
     while (true)
     {
