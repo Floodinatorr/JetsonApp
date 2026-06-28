@@ -13,7 +13,7 @@ find_package(CUDAToolkit REQUIRED)
 
 link_directories(${TENSORRT_ROOT}/lib)
 
-add_executable(jetsonApp main.cpp inference.cpp)
+add_executable(jetsonApp main.cpp inference.cpp preprocess.cu)
 
 target_include_directories(jetsonApp PRIVATE  
     ${OpenCV_INCLUDE_DIRS} 
