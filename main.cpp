@@ -3,59 +3,96 @@
 #include <opencv2/core/cuda.hpp>
 #include "inference.hpp"
 
-int main(){
+
+
+int main() {
+
+    cudaEvent_t evStart, evPreEnd, evInferEnd, evPostEnd;
+    cudaEventCreate(&evStart);
+    cudaEventCreate(&evPreEnd);
+    cudaEventCreate(&evInferEnd);
+    cudaEventCreate(&evPostEnd);
+
+    double totalPreMs = 0.0, totalInferMs = 0.0, totalPostMs = 0.0;
+    int frameCount = 0;
+
+
     int cuda_devices = cv::cuda::getCudaEnabledDeviceCount();
     if(cuda_devices <= 0) {
         std::cerr<< "Hata: Cihazınızda CUDA destekli bir GPU bulunamadı."<<std::endl;
         return -1;
     }
 
-    Engine engine("../models/yolo11s_fp16.engine", "../models/yolo11s.onnx");
+    Engine engine("../models/yolo11s.engine", "../models/yolo11s.onnx");
 
     cv::VideoCapture cap("../video.mkv");
     if(!cap.isOpened()) {
         std::cerr<<"Hata: Video açılamadı. "<<std::endl;
         return 0;
     }
-    
+
     cv::Mat frame;
-
-
-    while (true)
-    {
+    while (true) {
         cap >> frame;
         if(frame.empty()) break;
 
+        //İşlemlerin farklı şekillerde nasıl daha optimize çalışabileceğini ölçmek adına cudaEvent fonksiyonları kullanıldı.
+        cudaEventRecord(evStart, engine.getStream());
+
         engine.preprocess(frame);
+        cudaEventRecord(evPreEnd, engine.getStream());
+
+        if (!engine.infer()) {
+            std::cerr<<"Inference error."<<std::endl;
+            break;
+        }
+        cudaEventRecord(evInferEnd, engine.getStream());
+
+        auto detections = engine.postprocess(frame.cols, frame.rows);
+        cudaEventRecord(evPostEnd, engine.getStream());
+
+        cudaEventSynchronize(evPostEnd);
+
+        float preMs, inferMs, postMs;
+        cudaEventElapsedTime(&preMs, evStart, evPreEnd);
+        cudaEventElapsedTime(&inferMs, evPreEnd, evInferEnd);
+        cudaEventElapsedTime(&postMs, evInferEnd, evPostEnd);
+
+        totalPreMs += preMs;
+        totalInferMs += inferMs;
+        totalPostMs += postMs;
+        frameCount++;
+
+        for (const auto& det: detections) {
+            cv::rectangle(frame, det.box, cv::Scalar(0, 255, 0), 2);
+        }
+        double avgPre = totalPreMs / frameCount;
+        double avgInfer = totalInferMs / frameCount;
+        double avgPost = totalPostMs / frameCount;
+        double avgTotal = avgPre + avgInfer + avgPost;
+
+        std::string fpsText = "FPS: " + std::to_string(static_cast<int>(1000.0/avgTotal));
+        cv::putText(frame, fpsText, cv::Point(20, 40), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0,0, 255), 2);
         cv::imshow("JetsonApp", frame);
 
         if(cv::waitKey(1) == 27) break;
+
+        //Hangi işlemin ne kadar sürdüğünü görüntülemek için konsola bastırıyorum, bu sayede Infer işleminin çalışıp çalışmadığını ve optimize etmem gerekirse hangi kısımları etmeliyim bunu anlayacağım.
+        if (frameCount % 60 == 0) {
+            std::cout << "=== Frame " << frameCount << " ===\n"
+                      << "  Preprocess : " << avgPre   << " ms\n"
+                      << "  Infer      : " << avgInfer << " ms\n"
+                      << "  Postprocess: " << avgPost  << " ms\n"
+                      << "  TOPLAM     : " << avgTotal << " ms  (~" << (1000.0 / avgTotal) << " FPS)\n"
+                      << std::endl;
+        }
     }
-    
+
     cap.release();
     cv::destroyAllWindows();
-
-
-    /*
-    // Görüntüyü ilk aşamada CPU'ya okutup RAM'e yükledim
-    cv::Mat cpu_image = cv::imread("test.jpg", cv::IMREAD_COLOR);
-    if(cpu_image.empty()){
-        std::cerr<<"Hata: Resim dosyası yüklenemedi. "<<std::endl;
-        return -1;
-    }
-
-    //Şimdiyse RAM üzerindeki bilgiyi GPU belleğine (VRAM) aktaracağım, bu sayede işlemleri daha hızlı gerçekleştirebilirim
-    cv::cuda::GpuMat gpu_image, gpu_gray;
-    gpu_image.upload(cpu_image);
-    cv::cuda::cvtColor(gpu_image, gpu_gray, cv::COLOR_BGR2GRAY);
-
-    //Son olarak GPU belleğindeki görüntüyü tekrardan RAM'e çekeceğim
-    cv::Mat res;
-    gpu_gray.download(res);
-    
-    cv::imshow("JetsonApp", res);
-    cv::waitKey(0);
-    */
+    cudaEventDestroy(evStart);
+    cudaEventDestroy(evPreEnd);
+    cudaEventDestroy(evInferEnd);
+    cudaEventDestroy(evPostEnd);
     return 0;
-    
 }

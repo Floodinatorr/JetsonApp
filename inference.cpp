@@ -4,6 +4,9 @@
 #include <vector>
 #include <opencv2/cudaimgproc.hpp>
 #include <opencv2/cudawarping.hpp>
+#include <opencv2/core/cuda.hpp>
+#include <opencv2/core/cuda_stream_accessor.hpp>
+
 #include "preprocess.cuh"
 
 
@@ -15,6 +18,9 @@ Engine::Engine(const std::string& enginePath, const std::string& onnxPath) {
 
 Engine::~Engine() {
     std::cout<<"Program kapatıldı."<<std::endl;
+    cudaFree(inputDevice);
+    cudaFree(outputDevice);
+    cudaStreamDestroy(stream);
     delete(context);
     delete(engine);
     delete(runtime);
@@ -44,6 +50,7 @@ void Engine::modelInitialize(const std::string& enginePath, const std::string& o
         auto builder = nvinfer1::createInferBuilder(logger);
         auto network = builder->createNetworkV2(0);
         auto config = builder->createBuilderConfig();
+        config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
         auto parser = nvonnxparser::createParser(*network, logger);
 
         if(!parser->parseFromFile(onnxPath.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))){
@@ -67,20 +74,21 @@ void Engine::modelInitialize(const std::string& enginePath, const std::string& o
 }
 
 void Engine::allocateBuffers(){
-    //Bu adımda bellekten gerekli boyutlarda yer alacağım
+    //Bu adımda bellekten gerekli boyutlarda yer alıp tensorlara tahsis edeceğim
     auto inputDims = engine->getTensorShape("images");
     auto outputDims = engine->getTensorShape("output0");
+    numAnchors = outputDims.d[2];
+    numAttr = outputDims.d[1];
 
     inputBytes = sizeof(uint16_t);
     for(int i = 0; i<inputDims.nbDims; i++) inputBytes *= inputDims.d[i];
+    inputSize = inputBytes / sizeof(uint16_t);
     
     outputBytes = sizeof(uint16_t);
     for(int i = 0; i<outputDims.nbDims; i++) outputBytes *= outputDims.d[i];
-
-    chwSize  = 640 * 640 * 3 * sizeof(__half);
+    outputSize = outputBytes / sizeof(uint16_t);
 
     cudaMalloc((void**) &inputDevice, inputBytes);
-    cudaMalloc((void**) &inputDeviceFP16, chwSize);
     cudaMalloc((void**) &outputDevice, outputBytes);
 
     context->setTensorAddress("images", inputDevice);
@@ -99,24 +107,37 @@ void Engine::preprocess(const cv::Mat& image) {
      *     HWC (Height-Width-Color)     CHW (Color-Height-Width)
      *
      */
-    //
+
     // cv::Mat resized;
     // cv::resize(image, resized, cv::Size(640, 640));
     // cv::cvtColor(resized, resized, CV_BGR2RGB);
     // resized.convertTo(resized, CV_32FC3, 1.0f/255.0f);
 
-    cv::cuda::GpuMat gpuFrame, gpuResized, gpuRgb;
-    gpuFrame.upload(image);
-    cv::cuda::resize(gpuFrame, gpuResized, cv::Size(640, 640));
-    cv::cuda::cvtColor(gpuResized, gpuRgb, cv::COLOR_BGR2RGB);
+    cv::cuda::Stream cvStream = cv::cuda::StreamAccessor::wrapStream(stream);
+    gpuFrame.upload(image, cvStream);
 
-    launchHwc2Chw(gpuRgb.ptr<unsigned char>(), reinterpret_cast<__half*>(inputDevice), 640, 640);
+    launchFusedPreprocess(
+    gpuFrame.ptr<unsigned char>(), gpuFrame.cols, gpuFrame.rows, static_cast<int>(gpuFrame.step),
+    reinterpret_cast<__half*>(inputDevice), 640, 640,
+    stream);
     //Burada özellikle böyle karmaşık bir kod yazdım aksi takdirde 3*640*640 adet işlem yapmam gerekecekti HWC --> CHW dönüşümü için ancak CPU'mu seviyorum, GPU ile işlemek daha mantıklı
 
     if (const cudaError_t err = cudaGetLastError(); err != cudaSuccess)
     {
         std::cout << "CUDA preprocess error: " << cudaGetErrorString(err) << std::endl;
     }
+}
 
-    cudaDeviceSynchronize();
+bool Engine::infer() const {
+    if (!context->enqueueV3(stream)) {
+        std::cerr<<"TensorRT inference failed!"<<std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+std::vector<Detection> Engine::postprocess(int cols, int rows) {
+    std::vector<Detection> detections;
+    return detections;
 }

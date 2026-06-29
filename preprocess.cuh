@@ -1,2 +1,9 @@
+#pragma once
+
 #include <cuda_fp16.h>
-void launchHwc2Chw(const unsigned char* __restrict__ input, __half* __restrict__ output, int width, int height);
+#include <cuda_runtime.h>
+
+void launchFusedPreprocess(
+    const unsigned char* src, int srcWidth, int srcHeight, int srcStep,
+    __half* dst, int dstWidth, int dstHeight,
+    cudaStream_t stream);
