@@ -23,9 +23,9 @@ int main() {
         return -1;
     }
 
-    Engine engine("../models/yolo11s.engine", "../models/yolo11s.onnx");
+    Engine engine("../models/best.engine", "../models/yolo11s.onnx");
 
-    cv::VideoCapture cap("../video.mkv");
+    cv::VideoCapture cap("../video720p.mp4");
     if(!cap.isOpened()) {
         std::cerr<<"Hata: Video açılamadı. "<<std::endl;
         return 0;

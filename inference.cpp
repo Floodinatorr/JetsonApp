@@ -8,6 +8,7 @@
 #include <opencv2/core/cuda_stream_accessor.hpp>
 
 #include "preprocess.cuh"
+#include "postprocess.cuh"
 
 
 Engine::Engine(const std::string& enginePath, const std::string& onnxPath) {
@@ -24,6 +25,7 @@ Engine::~Engine() {
     delete(context);
     delete(engine);
     delete(runtime);
+    cudaFree(gpuResultsDevice); cudaFree(gpuResultCountDevice); cudaFreeHost(gpuResultsHostPinned);
 }
 
 void Engine::modelInitialize(const std::string& enginePath, const std::string& onnxPath){
@@ -81,6 +83,9 @@ void Engine::allocateBuffers(){
     numAnchors = outputDims.d[2];
     numAttr = outputDims.d[1];
 
+    boxesBuffer.reserve(numAnchors);
+    confidencesBuffer.reserve(numAnchors);
+    classIdsBuffer.reserve(numAnchors);
     inputBytes = sizeof(uint16_t);
     for(int i = 0; i<inputDims.nbDims; i++) inputBytes *= inputDims.d[i];
     inputSize = inputBytes / sizeof(uint16_t);
@@ -91,6 +96,9 @@ void Engine::allocateBuffers(){
 
     cudaMalloc((void**) &inputDevice, inputBytes);
     cudaMalloc((void**) &outputDevice, outputBytes);
+    cudaMalloc((void**)&gpuResultsDevice, maxGpuResults * sizeof(GpuDetection));
+    cudaMalloc((void**)&gpuResultCountDevice, sizeof(int));
+    cudaMallocHost((void**)&gpuResultsHostPinned, maxGpuResults * sizeof(GpuDetection));
 
     context->setTensorAddress("images", inputDevice);
     context->setTensorAddress("output0", outputDevice);
@@ -139,6 +147,56 @@ bool Engine::infer() const {
 }
 
 std::vector<Detection> Engine::postprocess(int cols, int rows) {
+    const float scaleX = cols / 640.0f;
+    const float scaleY = rows / 640.0f;
+
+    // ESKI: CPU'da 8400 x numAttr tarama dongusu (~26ms) - kaldirildi.
+    // YENI: GPU'da decode kernel'i taniyor, sadece esik gecen anchor'lari CPU'ya kopyaliyoruz.
+    launchDecodeKernel(
+        reinterpret_cast<__half*>(outputDevice), numAnchors, numAttr,
+        0.25f, scaleX, scaleY,
+        gpuResultsDevice, gpuResultCountDevice, maxGpuResults,
+        stream);
+
+    // Kac adet detection bulundugunu CPU'ya kopyala (4 byte, ucuz bir transfer)
+    int hostResultCount = 0;
+    cudaMemcpyAsync(&hostResultCount, gpuResultCountDevice, sizeof(int), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);  // hostResultCount'u okumadan once senkron olmak zorundayiz
+
+    int actualCount = std::min(hostResultCount, maxGpuResults);
+
+    // Sadece bulunan detection sayisinda veri kopyala (8400 degil, genelde <200)
+    if (actualCount > 0) {
+        cudaMemcpyAsync(gpuResultsHostPinned, gpuResultsDevice,
+                         actualCount * sizeof(GpuDetection),
+                         cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+    }
+
+    // NMS icin CPU tarafinda format donusumu (artik kucuk bir liste uzerinde, ucuz)
+    boxesBuffer.clear();
+    confidencesBuffer.clear();
+    classIdsBuffer.clear();
+
+    for (int i = 0; i < actualCount; i++) {
+        const GpuDetection& d = gpuResultsHostPinned[i];
+        boxesBuffer.emplace_back(d.left, d.top, d.width, d.height);
+        confidencesBuffer.push_back(d.score);
+        classIdsBuffer.push_back(d.classId);
+    }
+
+    std::vector<int> nmsIndices;
+    cv::dnn::NMSBoxes(boxesBuffer, confidencesBuffer, 0.25f, 0.45f, nmsIndices);
+
     std::vector<Detection> detections;
+    detections.reserve(nmsIndices.size());
+
+    for (int idx : nmsIndices) {
+        Detection det;
+        det.box = boxesBuffer[idx];
+        det.confidence = confidencesBuffer[idx];
+        det.classId = classIdsBuffer[idx];
+        detections.push_back(det);
+    }
     return detections;
 }

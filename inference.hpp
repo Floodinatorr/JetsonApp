@@ -4,6 +4,7 @@
 #include<cuda_fp16.h>
 #include<vector>
 #include<opencv2/opencv.hpp>
+#include "postprocess.cuh"
 
 struct Detection
 {
@@ -33,9 +34,13 @@ class Engine
     std::vector<__half> inputHost;
     cudaStream_t stream;
     cv::cuda::GpuMat gpuFrame;
-
-
-        
+    std::vector<cv::Rect> boxesBuffer;
+    std::vector<float> confidencesBuffer;
+    std::vector<int> classIdsBuffer;
+    static constexpr int maxGpuResults = 1024;
+    GpuDetection* gpuResultsDevice = nullptr;
+    int* gpuResultCountDevice = nullptr;
+    GpuDetection* gpuResultsHostPinned = nullptr;
 
     public:
     Engine(const std::string& enginePath, const std::string& onnxPath);
