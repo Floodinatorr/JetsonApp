@@ -58,6 +58,7 @@ void Engine::modelInitialize(const std::string& enginePath, const std::string& o
         }
 
         engine = builder->buildEngineWithConfig(*network, *config);
+        context = engine->createExecutionContext();
         auto serialized = engine->serialize();
 
         std::ofstream e_file(enginePath, std::ios::binary);
